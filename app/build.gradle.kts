@@ -6,9 +6,7 @@ plugins {
 
 android {
     namespace = "com.module.webview"
-    compileSdk {
-        version = release(36)
-    }
+    compileSdk = 36
 
     defaultConfig {
         applicationId = "com.module.webview"
@@ -42,6 +40,9 @@ android {
 }
 
 dependencies {
+    val media3_version = "1.9.0"
+
+    // Core Android & Compose
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.lifecycle.runtime.ktx)
     implementation(libs.androidx.activity.compose)
@@ -50,6 +51,8 @@ dependencies {
     implementation(libs.androidx.compose.ui.graphics)
     implementation(libs.androidx.compose.ui.tooling.preview)
     implementation(libs.androidx.compose.material3)
+
+    // Testing
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.espresso.core)
@@ -57,4 +60,20 @@ dependencies {
     androidTestImplementation(libs.androidx.compose.ui.test.junit4)
     debugImplementation(libs.androidx.compose.ui.tooling)
     debugImplementation(libs.androidx.compose.ui.test.manifest)
+
+    // Media3 ExoPlayer - Essential dependencies only
+    implementation("androidx.media3:media3-exoplayer:${media3_version}")
+    implementation("androidx.media3:media3-ui:${media3_version}")
+    implementation("androidx.media3:media3-common:${media3_version}")
+
+    // Media3 - Streaming format support
+    implementation("androidx.media3:media3-exoplayer-dash:${media3_version}")
+    implementation("androidx.media3:media3-exoplayer-hls:${media3_version}")
+
+    implementation("androidx.compose.material:material-icons-extended")
+
+
+    // Optional: Add these only if you need specific features
+    // implementation("androidx.media3:media3-exoplayer-rtsp:${media3_version}")
+    // implementation("androidx.media3:media3-datasource-okhttp:${media3_version}")
 }

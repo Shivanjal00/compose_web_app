@@ -1,45 +1,266 @@
 package com.module.webview
 
 import android.annotation.SuppressLint
-import android.graphics.Bitmap
+import android.content.pm.ActivityInfo
 import android.os.Bundle
-import android.view.View
-import android.view.ViewGroup
-import android.webkit.WebChromeClient
-import android.webkit.WebView
-import android.webkit.WebViewClient
-import android.widget.FrameLayout
+import android.webkit.*
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
-import androidx.activity.enableEdgeToEdge
+import androidx.compose.animation.*
+import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.media3.common.MediaItem
+import androidx.media3.common.Player
+import androidx.media3.common.util.UnstableApi
+import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.ui.AspectRatioFrameLayout
+import androidx.media3.ui.PlayerView
 import com.module.webview.ui.theme.WebviewTheme
+import kotlinx.coroutines.delay
+import java.util.concurrent.TimeUnit
 
 class MainActivity : ComponentActivity() {
-
-    companion object {
-        private var webViewState: Bundle? = null
-    }
-
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        enableEdgeToEdge()
+        WindowCompat.setDecorFitsSystemWindows(window, false)
         setContent {
             WebviewTheme {
-                Scaffold(modifier = Modifier.fillMaxSize()) { innerPadding ->
-                    WebViewScreen(
-                        url = "https://www.google.com", // Replace with your website URL
-                        savedState = webViewState,
-                        onSaveState = { webViewState = it },
-                        modifier = Modifier.padding(innerPadding)
+                Surface(modifier = Modifier.fillMaxSize(), color = Color.Black) {
+                    WebViewScreen("https://eminentfliex.com")
+                }
+            }
+        }
+    }
+}
+
+@SuppressLint("SetJavaScriptEnabled", "JavascriptInterface")
+@Composable
+fun WebViewScreen(url: String) {
+    val context = LocalContext.current
+    val activity = context as ComponentActivity
+    var nativeVideoUrl by remember { mutableStateOf<String?>(null) }
+    var webViewInstance by remember { mutableStateOf<WebView?>(null) }
+    var isPlayerLocked by remember { mutableStateOf(false) }
+
+    val jsInterface = remember {
+        object {
+            @JavascriptInterface
+            fun playNative(videoUrl: String) {
+                if (!isPlayerLocked && videoUrl.isNotEmpty() && nativeVideoUrl == null) {
+                    activity.runOnUiThread {
+                        // Pause all videos in WebView before opening native player
+                        webViewInstance?.evaluateJavascript("""
+                            (function() {
+                                var videos = document.querySelectorAll('video');
+                                videos.forEach(function(v) {
+                                    v.pause();
+                                });
+                            })();
+                        """, null)
+
+                        nativeVideoUrl = videoUrl
+                        isPlayerLocked = true
+                    }
+                }
+            }
+        }
+    }
+
+    val closePlayer = {
+        nativeVideoUrl = null
+        activity.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+        toggleSystemUI(activity, true)
+
+        // Stay locked for 3 seconds after closing to prevent immediate re-triggering
+        activity.runOnUiThread {
+            webViewInstance?.evaluateJavascript("if(window.scanner) clearInterval(window.scanner);", null)
+            Thread {
+                Thread.sleep(3000)
+                isPlayerLocked = false
+            }.start()
+        }
+    }
+
+    BackHandler {
+        if (nativeVideoUrl != null) closePlayer()
+        else if (webViewInstance?.canGoBack() == true) webViewInstance?.goBack()
+        else activity.finish()
+    }
+
+    Box(modifier = Modifier.fillMaxSize()) {
+        AndroidView(
+            factory = { ctx ->
+                WebView(ctx).apply {
+                    webViewInstance = this
+                    settings.apply {
+                        javaScriptEnabled = true
+                        domStorageEnabled = true
+                        mediaPlaybackRequiresUserGesture = false
+                    }
+                    addJavascriptInterface(jsInterface, "AppBridge")
+
+                    webViewClient = object : WebViewClient() {
+                        override fun onPageFinished(view: WebView?, url: String?) {
+                            view?.evaluateJavascript("""
+                                (function() {
+                                    if (window.scanner) clearInterval(window.scanner);
+                                    window.scanner = setInterval(function() {
+                                        var v = document.querySelector('video');
+                                        if (v && v.src && v.src.length > 5) {
+                                            window.AppBridge.playNative(v.src);
+                                        }
+                                    }, 1500);
+                                })();
+                            """, null)
+                        }
+                    }
+
+                    webChromeClient = object : WebChromeClient() {
+                        override fun onShowCustomView(view: android.view.View?, callback: CustomViewCallback?) {
+                            // Prevent WebView's default fullscreen - use native player instead
+                            callback?.onCustomViewHidden()
+                        }
+                    }
+
+                    loadUrl(url)
+                }
+            },
+            modifier = Modifier.fillMaxSize()
+        )
+
+        if (nativeVideoUrl != null) {
+            NetflixPlayer(url = nativeVideoUrl!!) { closePlayer() }
+        }
+    }
+}
+
+@androidx.annotation.OptIn(UnstableApi::class)
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun NetflixPlayer(url: String, onClose: () -> Unit) {
+    val context = LocalContext.current
+    val activity = context as ComponentActivity
+    val exoPlayer = remember(url) {
+        ExoPlayer.Builder(context).build().apply {
+            setMediaItem(MediaItem.fromUri(url))
+            prepare()
+            playWhenReady = true
+        }
+    }
+
+    var isVisible by remember { mutableStateOf(true) }
+    var currentPos by remember { mutableLongStateOf(0L) }
+    var totalDuration by remember { mutableLongStateOf(0L) }
+    var isPlaying by remember { mutableStateOf(false) }
+
+    DisposableEffect(exoPlayer) {
+        val listener = object : Player.Listener {
+            override fun onPlaybackStateChanged(state: Int) {
+                if (state == Player.STATE_READY) exoPlayer.play()
+            }
+            override fun onIsPlayingChanged(p: Boolean) { isPlaying = p }
+        }
+        exoPlayer.addListener(listener)
+        onDispose {
+            exoPlayer.stop()
+            exoPlayer.release()
+        }
+    }
+
+    LaunchedEffect(exoPlayer) {
+        while (true) {
+            currentPos = exoPlayer.currentPosition
+            totalDuration = exoPlayer.duration.coerceAtLeast(0L)
+            delay(500)
+        }
+    }
+
+    LaunchedEffect(Unit) {
+        activity.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+        toggleSystemUI(activity, false)
+    }
+
+    Box(modifier = Modifier.fillMaxSize().background(Color.Black)
+        .pointerInput(Unit) { detectTapGestures(onTap = { isVisible = !isVisible }) }
+    ) {
+        AndroidView(
+            factory = { PlayerView(it).apply {
+                player = exoPlayer
+                useController = false
+                resizeMode = AspectRatioFrameLayout.RESIZE_MODE_ZOOM
+            } },
+            modifier = Modifier.fillMaxSize()
+        )
+
+        AnimatedVisibility(visible = isVisible, enter = fadeIn(), exit = fadeOut()) {
+            Box(modifier = Modifier.fillMaxSize().background(Brush.verticalGradient(
+                listOf(Color.Black.copy(0.7f), Color.Transparent, Color.Black.copy(0.8f))
+            ))) {
+
+                IconButton(onClick = onClose, modifier = Modifier.padding(16.dp).align(Alignment.TopStart)) {
+                    Icon(Icons.AutoMirrored.Filled.ArrowBack, null, tint = Color.White, modifier = Modifier.size(28.dp))
+                }
+
+                Row(modifier = Modifier.align(Alignment.Center), verticalAlignment = Alignment.CenterVertically) {
+                    IconButton(onClick = { exoPlayer.seekTo(currentPos - 10000) }, modifier = Modifier.size(80.dp)) {
+                        Icon(Icons.Default.KeyboardArrowLeft, null, tint = Color.White, modifier = Modifier.size(45.dp))
+                    }
+                    Spacer(Modifier.width(30.dp))
+
+                    IconButton(onClick = { if(isPlaying) exoPlayer.pause() else exoPlayer.play() }, modifier = Modifier.size(100.dp)) {
+                        Icon(
+                            if (isPlaying) Icons.Filled.Pause else Icons.Filled.PlayArrow,
+                            null,
+                            tint = Color.White,
+                            modifier = Modifier.size(85.dp)
+                        )
+                    }
+                    Spacer(Modifier.width(30.dp))
+
+                    IconButton(onClick = { exoPlayer.seekTo(currentPos + 10000) }, modifier = Modifier.size(80.dp)) {
+                        Icon(Icons.Default.KeyboardArrowRight, null, tint = Color.White, modifier = Modifier.size(45.dp))
+                    }
+                }
+
+                Column(modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 20.dp, start = 40.dp, end = 40.dp)) {
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                        Text(formatTime(currentPos), color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+                        Text(formatTime(totalDuration), color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+                    }
+
+                    Slider(
+                        value = if (totalDuration > 0) currentPos.toFloat() / totalDuration.toFloat() else 0f,
+                        onValueChange = { exoPlayer.seekTo((it * totalDuration).toLong()) },
+                        modifier = Modifier.fillMaxWidth().height(12.dp),
+                        thumb = { Box(modifier = Modifier.size(10.dp).background(Color.Red, CircleShape)) },
+                        track = { sliderState ->
+                            SliderDefaults.Track(
+                                sliderState = sliderState,
+                                modifier = Modifier.height(2.dp),
+                                thumbTrackGapSize = 0.dp,
+                                colors = SliderDefaults.colors(activeTrackColor = Color.Red, inactiveTrackColor = Color.White.copy(0.2f))
+                            )
+                        }
                     )
                 }
             }
@@ -47,189 +268,15 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-@SuppressLint("SetJavaScriptEnabled")
-@Composable
-fun WebViewScreen(
-    url: String,
-    savedState: Bundle? = null,
-    onSaveState: (Bundle) -> Unit = {},
-    modifier: Modifier = Modifier
-) {
-    var isLoading by remember { mutableStateOf(true) }
-    var loadProgress by remember { mutableStateOf(0) }
-    var canGoBack by remember { mutableStateOf(false) }
-    var webView: WebView? by remember { mutableStateOf(null) }
-    var customView by remember { mutableStateOf<View?>(null) }
-    var customViewCallback by remember { mutableStateOf<WebChromeClient.CustomViewCallback?>(null) }
+fun formatTime(ms: Long): String {
+    val h = TimeUnit.MILLISECONDS.toHours(ms)
+    val m = TimeUnit.MILLISECONDS.toMinutes(ms) % 60
+    val s = TimeUnit.MILLISECONDS.toSeconds(ms) % 60
+    return if (h > 0) String.format("%02d:%02d:%02d", h, m, s) else String.format("%02d:%02d", m, s)
+}
 
-    val context = LocalContext.current
-    val activity = context as? ComponentActivity
-
-    // Save WebView state on disposal
-    DisposableEffect(Unit) {
-        onDispose {
-            webView?.let { wv ->
-                val bundle = Bundle()
-                wv.saveState(bundle)
-                onSaveState(bundle)
-            }
-        }
-    }
-
-    // Handle back press
-    BackHandler(enabled = customView != null || canGoBack) {
-        when {
-            customView != null -> {
-                // Exit fullscreen if in fullscreen mode
-                customViewCallback?.onCustomViewHidden()
-            }
-            canGoBack -> {
-                // Navigate back in WebView
-                webView?.goBack()
-            }
-        }
-    }
-
-    Box(modifier = modifier.fillMaxSize()) {
-        // Fullscreen container
-        if (customView != null) {
-            AndroidView(
-                factory = { customView!! },
-                modifier = Modifier.fillMaxSize()
-            )
-        } else {
-            AndroidView(
-                factory = { ctx ->
-                    WebView(ctx).apply {
-                        webViewClient = object : WebViewClient() {
-                            override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
-                                super.onPageStarted(view, url, favicon)
-                                isLoading = true
-                            }
-
-                            override fun onPageFinished(view: WebView?, url: String?) {
-                                super.onPageFinished(view, url)
-                                isLoading = false
-                                canGoBack = view?.canGoBack() ?: false
-                            }
-                        }
-
-                        webChromeClient = object : WebChromeClient() {
-                            override fun onProgressChanged(view: WebView?, newProgress: Int) {
-                                super.onProgressChanged(view, newProgress)
-                                loadProgress = newProgress
-                            }
-
-                            // Handle fullscreen for videos
-                            override fun onShowCustomView(view: View?, callback: CustomViewCallback?) {
-                                if (customView != null) {
-                                    callback?.onCustomViewHidden()
-                                    return
-                                }
-
-                                customView = view
-                                customViewCallback = callback
-
-                                // Hide system UI for fullscreen
-                                activity?.window?.decorView?.systemUiVisibility = (
-                                        View.SYSTEM_UI_FLAG_FULLSCREEN
-                                                or View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
-                                                or View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
-                                        )
-                            }
-
-                            override fun onHideCustomView() {
-                                customView = null
-                                customViewCallback?.onCustomViewHidden()
-                                customViewCallback = null
-
-                                // Restore system UI
-                                activity?.window?.decorView?.systemUiVisibility = View.SYSTEM_UI_FLAG_VISIBLE
-                            }
-                        }
-
-                        settings.apply {
-                            // Enable JavaScript
-                            javaScriptEnabled = true
-
-                            // Enable DOM storage
-                            domStorageEnabled = true
-
-                            // Enable database
-                            databaseEnabled = true
-
-                            // Enable zoom controls
-                            setSupportZoom(true)
-                            builtInZoomControls = true
-                            displayZoomControls = false
-
-                            // Enable responsive design
-                            useWideViewPort = true
-                            loadWithOverviewMode = true
-
-                            // Enable caching
-                            cacheMode = android.webkit.WebSettings.LOAD_DEFAULT
-
-                            // Enable media playback without user gesture
-                            mediaPlaybackRequiresUserGesture = false
-
-                            // Enable safe browsing
-                            safeBrowsingEnabled = true
-
-                            // Allow file access
-                            allowFileAccess = true
-                            allowContentAccess = true
-
-                            // Mixed content mode (for HTTPS sites loading HTTP resources)
-                            mixedContentMode = android.webkit.WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
-
-                            // Support multiple windows
-                            setSupportMultipleWindows(true)
-
-                            // Enable plugins (for video playback)
-                            javaScriptCanOpenWindowsAutomatically = true
-                        }
-
-                        // Restore state if available, otherwise load URL
-                        if (savedState != null) {
-                            restoreState(savedState)
-                        } else {
-                            loadUrl(url)
-                        }
-
-                        webView = this
-                    }
-                },
-                modifier = Modifier.fillMaxSize()
-            )
-
-            // Loading indicator (only show when not in fullscreen)
-            if (isLoading) {
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .align(Alignment.TopCenter)
-                        .padding(16.dp),
-                    horizontalAlignment = Alignment.CenterHorizontally
-                ) {
-                    LinearProgressIndicator(
-                        progress = { loadProgress / 100f },
-                        modifier = Modifier.fillMaxWidth()
-                    )
-                }
-            }
-
-            // Back button (only show when not in fullscreen)
-            if (canGoBack) {
-                FloatingActionButton(
-                    onClick = { webView?.goBack() },
-                    modifier = Modifier
-                        .align(Alignment.BottomStart)
-                        .padding(16.dp)
-                ) {
-                    Text("←", style = MaterialTheme.typography.headlineMedium)
-                }
-            }
-        }
-    }
+fun toggleSystemUI(activity: ComponentActivity, show: Boolean) {
+    val controller = WindowCompat.getInsetsController(activity.window, activity.window.decorView)
+    if (show) controller.show(WindowInsetsCompat.Type.systemBars())
+    else controller.hide(WindowInsetsCompat.Type.systemBars())
 }
